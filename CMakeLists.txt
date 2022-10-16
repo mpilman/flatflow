@@ -19,7 +19,7 @@ add_library(flatbuffers STATIC flatbuffers/AST.h
         flatbuffers/Error.h
         flatbuffers/CodeGenerator.cpp
         flatbuffers/Config.cpp
-        flatbuffers/Config.h)
+        flatbuffers/Config.h flatbuffers/StaticContext.cpp flatbuffers/StaticContext.h flatbuffers/CodeGenerator.h)
 target_link_libraries(flatbuffers PUBLIC Boost::filesystem fmt::fmt flowflat)
 
 add_executable(flowflatc main.cpp)

@@ -10,6 +10,7 @@
 
 #include <boost/unordered_map.hpp>
 #include <boost/unordered_set.hpp>
+#include <boost/filesystem/path.hpp>
 
 #include "AST.h"
 #include "Error.h"
@@ -17,6 +18,8 @@
 namespace flatbuffers {
 
 class Compiler;
+
+struct StaticContext;
 
 namespace expression {
 
@@ -27,14 +30,25 @@ struct MetadataEntry {
 	std::any value;
 };
 
-struct Enum {
+// the type of the type -- I like silly names
+enum class TypeType { Primitive, Enum, Union, Struct, Table };
+
+struct Type {
 	std::string name;
+	Type() = default;
+	explicit Type(std::string const& name);
+	virtual ~Type() = default;
+	[[nodiscard]] virtual TypeType typeType() const = 0;
+};
+
+struct Enum : Type {
+	[[nodiscard]] TypeType typeType() const override { return TypeType::Enum; }
 	std::string type;
 	std::vector<std::pair<std::string, int64_t>> values;
 };
 
-struct Union {
-	std::string name;
+struct Union : Type {
+	[[nodiscard]] TypeType typeType() const override { return TypeType::Union; }
 	std::vector<std::string> types;
 };
 
@@ -44,20 +58,19 @@ struct Field {
 	bool isArrayType = false;
 	std::optional<std::string> defaultValue;
 	std::vector<MetadataEntry> metadata;
-
-	[[nodiscard]] unsigned size(Compiler const& compiler) const;
 };
 
-struct StructOrTable {
-	std::string name;
+struct StructOrTable : Type {
 	std::vector<Field> fields;
-
-	[[nodiscard]] unsigned size(Compiler const& compiler) const;
 };
 
-struct Struct : StructOrTable {};
+struct Struct : StructOrTable {
+	[[nodiscard]] TypeType typeType() const override { return TypeType::Struct; }
+};
 
-struct Table : StructOrTable {};
+struct Table : StructOrTable {
+	[[nodiscard]] TypeType typeType() const override { return TypeType::Table; }
+};
 
 struct ExpressionTree {
 	std::optional<std::vector<std::string>> namespacePath;
@@ -74,32 +87,47 @@ struct ExpressionTree {
 
 	void verifyField(std::string name, bool isStruct, Field const& field) const;
 
-	void verify() const;
+	std::optional<Type const*> findType(std::string const& name) const;
+
+	void verify(StaticContext const& context) const;
 };
 
 enum class PrimitiveTypeClass { BoolType, CharType, IntType, FloatType, StringType };
 
-struct TypeDescription {
+struct PrimitiveType : Type {
 	std::string_view nativeName;
 	PrimitiveTypeClass typeClass;
 	unsigned _size;
 
+	PrimitiveType() = default;
+	PrimitiveType(std::string name, std::string_view nativeName, PrimitiveTypeClass typeClass, unsigned _size)
+	  : Type(name), nativeName(nativeName), typeClass(typeClass), _size(_size) {}
+
 	[[nodiscard]] unsigned size() const { return _size; }
+	[[nodiscard]] TypeType typeType() const override { return TypeType::Primitive; }
 };
 
-extern boost::unordered_map<std::string_view, TypeDescription> primitiveTypes;
+extern boost::unordered_map<std::string_view, PrimitiveType> primitiveTypes;
 
 } // namespace expression
+
+struct TypeName {
+	std::string name;
+	std::vector<std::string> path;
+};
+
+struct StaticContext;
 
 class Compiler {
 	friend struct expression::Field;
 	friend struct expression::StructOrTable;
+	friend class StaticContext;
 	// compiled files (used to optimize includes). Filepath -> expression tree
-	boost::unordered_map<std::string, std::shared_ptr<expression::ExpressionTree>> files;
+	boost::unordered_map<boost::filesystem::path, std::shared_ptr<StaticContext>> files;
 	// where to search for included files
 	std::vector<std::string> includePaths;
 	// Files that got compiled in this run
-	boost::unordered_map<std::string, std::shared_ptr<expression::ExpressionTree>> compiledFiles;
+	boost::unordered_map<boost::filesystem::path, std::shared_ptr<StaticContext>> compiledFiles;
 
 public:
 	explicit Compiler(std::vector<std::string> includePaths);

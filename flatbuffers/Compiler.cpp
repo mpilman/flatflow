@@ -7,12 +7,16 @@
 #include <functional>
 #include <cstdio>
 #include <cstdint>
+#include <iostream>
 
 #include <fmt/format.h>
 #include <fstream>
+#include <boost/filesystem/operations.hpp>
 
 #include "Config.h"
 #include "Compiler.h"
+#include "StaticContext.h"
+#include "CodeGenerator.h"
 #include "Parser.h"
 #include "Error.h"
 
@@ -24,33 +28,32 @@ using namespace std::string_view_literals;
 namespace expression {
 
 // clang-format off
-#define DESC(t, c) { #t, PrimitiveTypeClass::c##Type, sizeof(t) }
+#define DESC(n, t, c)  PrimitiveType(n, #t, PrimitiveTypeClass::c##Type, sizeof(t))
 // clang-format on
 
-boost::unordered_map<std::string_view, TypeDescription> primitiveTypes{
-	{ "bool", DESC(bool, Bool) },
-	{ "byte", DESC(char, Char) },
-	{ "ubyte", DESC(unsigned char, Char) },
-	{ "short", DESC(short, Int) },
-	{ "ushort", { "unsigned short", PrimitiveTypeClass::IntType } },
-	{ "int", DESC(int, Int) },
-	{ "uint", DESC(unsigned, Int) },
-	{ "float", DESC(float, Float) },
-	{ "long", DESC(long, Int) },
-	{ "ulong", DESC(unsigned long, Int) },
-	{ "double", DESC(double, Float) },
-	{ "int8", DESC(int8_t, Int) },
-	{ "uint8", DESC(uint8_t, Int) },
-	{ "int16", DESC(int16_t, Int) },
-	{ "uint16", DESC(uint16_t, Int) },
-	{ "int32", DESC(int32_t, Int) },
-	{ "uint32", DESC(uint32_t, Int) },
-	{ "int64", DESC(int64_t, Int) },
-	{ "uint64", DESC(uint64_t, Int) },
-	{ "float32", DESC(float, Float) },
-	{ "float64", DESC(double, Float) },
-	{ "string",
-	  TypeDescription{ .nativeName = config::stringType, .typeClass = PrimitiveTypeClass::StringType, ._size = 4 } },
+boost::unordered_map<std::string_view, PrimitiveType> primitiveTypes{
+	{ "bool"sv, DESC("bool", bool, Bool) },
+	{ "byte"sv, DESC("byte", char, Char) },
+	{ "ubyte"sv, DESC("ubyte", unsigned char, Char) },
+	{ "short"sv, DESC("short", short, Int) },
+	{ "ushort"sv, DESC("ushort", unsigned short, Int) },
+	{ "int"sv, DESC("int", int, Int) },
+	{ "uint"sv, DESC("uint", unsigned, Int) },
+	{ "float"sv, DESC("float", float, Float) },
+	{ "long"sv, DESC("long", long, Int) },
+	{ "ulong"sv, DESC("ulong", unsigned long, Int) },
+	{ "double"sv, DESC("double", double, Float) },
+	{ "int8"sv, DESC("int8", int8_t, Int) },
+	{ "uint8"sv, DESC("uint8", uint8_t, Int) },
+	{ "int16"sv, DESC("int16", int16_t, Int) },
+	{ "uint16"sv, DESC("uint16", uint16_t, Int) },
+	{ "int32"sv, DESC("int32", int32_t, Int) },
+	{ "uint32"sv, DESC("uint32", uint32_t, Int) },
+	{ "int64"sv, DESC("int64", int64_t, Int) },
+	{ "uint64"sv, DESC("uint64", uint64_t, Int) },
+	{ "float32"sv, DESC("float32", float, Float) },
+	{ "float64"sv, DESC("float64", double, Float) },
+	{ "string"sv, PrimitiveType{ "string", config::stringType, PrimitiveTypeClass::StringType, 4 } },
 };
 } // namespace expression
 
@@ -89,29 +92,30 @@ bool startsWith(std::string_view str, std::string_view prefix) {
 }
 
 struct CompilerVisitor : ast::Visitor {
-	expression::ExpressionTree& state;
+	StaticContext& state;
 
-	explicit CompilerVisitor(expression::ExpressionTree& state) : state(state) {}
+	explicit CompilerVisitor(StaticContext& state) : state(state) {}
 
 	void visit(const struct ast::IncludeDeclaration& declaration) override { Visitor::visit(declaration); }
 	void visit(const struct ast::NamespaceDeclaration& declaration) override {
-		if (state.namespacePath.has_value()) {
+		if (state.currentFile->namespacePath.has_value()) {
 			fmt::print(stderr, "Error: Unexpected namespace declaration: {}\n", fmt::join(declaration.name, "."));
-			fmt::print(stderr, "       {} was declared before\n", fmt::join(state.namespacePath.value(), "."));
+			fmt::print(
+			    stderr, "       {} was declared before\n", fmt::join(state.currentFile->namespacePath.value(), "."));
 			throw Error("Unexpected namespace");
 		} else {
-			state.namespacePath = declaration.name;
+			state.currentFile->namespacePath = declaration.name;
 		}
 	}
 	void visit(const struct ast::AttributeDeclaration& declaration) override {
-		if (state.attributes.contains(declaration.attribute)) {
+		if (state.currentFile->attributes.contains(declaration.attribute)) {
 			fmt::print(stderr, "Error: Attribute {} defined multiple times\n", declaration.attribute);
 			throw Error("Multiple attributes");
 		} else if (reservedAttributes.contains(declaration.attribute) || startsWith(declaration.attribute, "native_")) {
 			fmt::print(stderr, "Error: Attribute {} is reserved\n", declaration.attribute);
 			throw Error("Reserved attribute");
 		} else {
-			state.attributes.insert(declaration.attribute);
+			state.currentFile->attributes.insert(declaration.attribute);
 		}
 	}
 	void visit(const struct ast::RootDeclaration& declaration) override {
@@ -119,18 +123,18 @@ struct CompilerVisitor : ast::Visitor {
 			fmt::print(stderr, "Error: Primitive type {} can't be declared as root type\n", declaration.rootType);
 			throw Error("Primitive root type");
 		} else {
-			state.rootTypes.insert(declaration.rootType);
+			state.currentFile->rootTypes.insert(declaration.rootType);
 		}
 	}
 	void visit(const struct ast::FileExtensionDeclaration& declaration) override {
-		if (state.fileExtension.has_value()) {
+		if (state.currentFile->fileExtension.has_value()) {
 			fmt::print(stderr,
 			           "Multiple file extensions \"{}\" and \"{}\"\n",
-			           state.fileExtension.value(),
+			           state.currentFile->fileExtension.value(),
 			           declaration.extension);
 			throw Error("Multiple file extensions");
 		} else {
-			state.fileExtension = declaration.extension;
+			state.currentFile->fileExtension = declaration.extension;
 		}
 	}
 	void visit(const struct ast::FileIdentifierDeclaration& declaration) override {
@@ -140,18 +144,18 @@ struct CompilerVisitor : ast::Visitor {
 			           declaration.identifier,
 			           declaration.identifier.size());
 			throw Error("File identifier too long");
-		} else if (state.fileIdentifier.has_value()) {
+		} else if (state.currentFile->fileIdentifier.has_value()) {
 			fmt::print(stderr,
 			           "Multiple file identifiers \"{}\" and \"{}\"\n",
-			           state.fileExtension.value(),
+			           state.currentFile->fileExtension.value(),
 			           declaration.identifier);
 			throw Error("Multiple file extensions");
 		} else {
-			state.fileIdentifier = declaration.identifier;
+			state.currentFile->fileIdentifier = declaration.identifier;
 		}
 	}
 	void visit(const struct ast::EnumDeclaration& declaration) override {
-		if (state.typeExists(declaration.identifier)) {
+		if (state.currentFile->typeExists(declaration.identifier)) {
 			fmt::print(stderr, "Error: Type {} already exists\n", declaration.identifier);
 			throw Error("Duplicate type");
 		} else if (!primitiveTypes.contains(declaration.type) ||
@@ -184,10 +188,10 @@ struct CompilerVisitor : ast::Visitor {
 			usedValues.insert(value);
 			newEnum.values.emplace_back(val.first, value);
 		}
-		state.enums.emplace(newEnum.name, std::move(newEnum));
+		state.currentFile->enums.emplace(newEnum.name, std::move(newEnum));
 	}
 	void visit(const struct ast::UnionDeclaration& declaration) override {
-		if (state.typeExists(declaration.identifier)) {
+		if (state.currentFile->typeExists(declaration.identifier)) {
 			fmt::print(stderr, "Error: Type {} already exists\n", declaration.identifier);
 			throw Error("Duplicate type");
 		}
@@ -204,12 +208,12 @@ struct CompilerVisitor : ast::Visitor {
 			}
 			newUnion.types.push_back(val.first);
 		}
-		state.unions.emplace(newUnion.name, std::move(newUnion));
+		state.currentFile->unions.emplace(newUnion.name, std::move(newUnion));
 	}
 
 	void constructStructOrTable(expression::StructOrTable& res,
 	                            std::vector<ast::FieldDeclaration> const& fields) const {
-		if (state.typeExists(res.name)) {
+		if (state.currentFile->typeExists(res.name)) {
 			fmt::print(stderr, "Error: Type {} already exists\n", res.name);
 			throw Error("Duplicate type");
 		}
@@ -237,22 +241,19 @@ struct CompilerVisitor : ast::Visitor {
 		expression::Struct res;
 		res.name = declaration.identifier;
 		constructStructOrTable(res, declaration.fields);
-		state.structs.emplace(res.name, std::move(res));
+		state.currentFile->structs.emplace(res.name, std::move(res));
 	}
 	void visit(const struct ast::TableDeclaration& declaration) override {
 		expression::Table res;
 		res.name = declaration.identifier;
 		constructStructOrTable(res, declaration.fields);
-		state.tables.emplace(res.name, std::move(res));
+		state.currentFile->tables.emplace(res.name, std::move(res));
 	}
 };
 
 } // namespace
 
 namespace expression {
-
-unsigned Field::size(Compiler const& compiler) const {}
-unsigned StructOrTable::size(const Compiler& compiler) const {}
 
 bool ExpressionTree::typeExists(const std::string& name) const {
 	return primitiveTypes.contains(name) || enums.contains(name) || unions.contains(name) || structs.contains(name) ||
@@ -315,8 +316,18 @@ void ExpressionTree::verifyField(std::string name, bool isStruct, const Field& f
 	}
 }
 
-void ExpressionTree::verify() const {
-	// verify all root types exist and are tables
+void ExpressionTree::verify(StaticContext const& context) const {
+	auto assertTypeIsUnique = [&context](std::string const& name) {
+		if (context.resolve(name)) {
+			std::cerr << fmt::format("Error: Duplicate type: {}", name);
+			throw Error("Duplicate type");
+		}
+	};
+	// verify all enums are unique types
+	for (auto const& [_, e] : enums) {
+		assertTypeIsUnique(e.name);
+	}
+	// verify all root types exist in current file and are tables
 	for (auto const& t : rootTypes) {
 		if (!tables.contains(t)) {
 			fmt::print(
@@ -326,6 +337,7 @@ void ExpressionTree::verify() const {
 	}
 	// verify that all unions reference tables
 	for (auto const& [name, u] : unions) {
+		assertTypeIsUnique(u.name);
 		for (auto const& t : u.types) {
 			if (!tables.contains(t)) {
 				fmt::print(stderr,
@@ -338,33 +350,64 @@ void ExpressionTree::verify() const {
 	}
 	// verify that structs and tables reference proper types
 	for (auto const& s : structs) {
+		assertTypeIsUnique(s.second.name);
 		for (auto const& field : s.second.fields) {
 			verifyField(s.first, true, field);
 		}
 	}
 	for (auto const& s : tables) {
+		assertTypeIsUnique(s.second.name);
 		for (auto const& field : s.second.fields) {
 			verifyField(s.first, false, field);
 		}
 	}
 }
+std::optional<Type const*> ExpressionTree::findType(const std::string& name) const {
+	std::optional<const Type*> res;
+	if (auto eIter = enums.find(name); eIter != enums.end()) {
+		res = &eIter->second;
+	} else if (auto uIter = unions.find(name); uIter != unions.end()) {
+		res = &uIter->second;
+	} else if (auto sIter = structs.find(name); sIter != structs.end()) {
+		res = &sIter->second;
+	} else if (auto tIter = tables.find(name); tIter != tables.end()) {
+		res = &tIter->second;
+	}
+	return res;
+}
 } // namespace expression
+
+StaticContext::StaticContext(Compiler& compiler)
+  : compiler(compiler), currentFile(std::make_shared<ExpressionTree>()) {}
 
 Compiler::Compiler(std::vector<std::string> includePaths) : includePaths(std::move(includePaths)) {}
 
-void Compiler::compile(std::string const& path) {
+void Compiler::compile(std::string const& inputPath) {
+	boost::filesystem::path path = boost::filesystem::canonical(inputPath);
 	if (auto iter = files.find(path); iter != files.end()) {
 		compiledFiles[path] = iter->second;
 	}
-	auto res = std::make_shared<expression::ExpressionTree>();
+	auto res = std::make_shared<StaticContext>(*this);
 	std::ifstream ifs(path.c_str());
 	std::string content((std::istreambuf_iterator<char>(ifs)), (std::istreambuf_iterator<char>()));
 	auto schema = parseSchema(content);
 	CompilerVisitor visitor(*res);
 	schema.accept(visitor);
-	res->verify();
+	res->currentFile->verify(*res);
 	files[path] = res;
 	compiledFiles[path] = res;
+}
+
+void Compiler::generateCode(const std::string& headerDir, const std::string& sourceDir) {
+	namespace fs = boost::filesystem;
+	for (auto const& [name, context] : compiledFiles) {
+		auto stem = fs::path(name).stem().string();
+		auto headerFileName = stem + ".h";
+		auto sourceFileName = stem + ".cpp";
+		auto header = fs::path(headerDir) / headerFileName;
+		auto source = fs::path(sourceDir) / sourceFileName;
+		CodeGenerator(context.get()).emit(stem, header, source);
+	}
 }
 
 } // namespace flatbuffers

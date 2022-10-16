@@ -2,11 +2,28 @@
 // Created by Markus Pilman on 10/15/22.
 //
 
+#include <fstream>
+#include <string>
+#include <any>
+
+#include <boost/filesystem.hpp>
+#include <boost/algorithm/string.hpp>
+
+#include <flowflat/flowflat.h>
+
+#include "Config.h"
 #include "Compiler.h"
+
+using namespace std::string_literals;
 
 namespace flatbuffers {
 
 namespace {
+
+struct Streams {
+	std::ostream* header;
+	std::ostream* source;
+};
 
 struct Defer {
 	std::vector<std::function<void()>> functions;
@@ -18,33 +35,74 @@ struct Defer {
 	void operator()(std::function<void()> fun) { functions.push_back(std::move(fun)); }
 };
 
-std::string_view convertType(std::string const& t) {
+std::string convertType(std::string const& t) {
 	if (auto iter = expression::primitiveTypes.find(t); iter != expression::primitiveTypes.end()) {
-		return iter->second.first;
+		return std::string(iter->second.nativeName);
 	}
-	return t;
+	std::vector<std::string> path;
+	boost::split(path, t, boost::is_any_of("."));
+	return fmt::format("{}", fmt::join(path, "::"));
 }
 
-void emit(std::ostream& out, expression::Enum const& f) {
-	Defer defer;
-	out << fmt::format("enum class {} : {} {{\n", f.name, convertType(f.type));
-	defer([&out]() { out << "};\n"; });
-	std::vector<std::string> definitions;
-	for (auto const& [k, v] : f.values) {
-		definitions.push_back(fmt::format("\t{} = {}", k, v));
+void emit(Streams out, expression::Enum const& f) {
+	// 0. generate the enum
+	{
+		Defer defer;
+		*out.header << fmt::format("enum class {} : {} {{\n", f.name, convertType(f.type));
+		defer([&out]() { *out.header << "};\n\n"; });
+		std::vector<std::string> definitions;
+		for (auto const& [k, v] : f.values) {
+			definitions.push_back(fmt::format("\t{} = {}", k, v));
+		}
+		*out.header << fmt::format("{}\n", fmt::join(definitions, ",\n"));
 	}
-	out << fmt::format("{}\n", fmt::join(definitions, ",\n"));
+	// 1. Generate the helper functions
+	{
+		*out.header << fmt::format("// {} helper functions\n", f.name);
+		*out.source << fmt::format("// {} helper functions\n", f.name);
+		// toString
+		*out.header << fmt::format("{0} toString({1});\n", config::stringType, f.name);
+		*out.source << fmt::format("{0} toString({1} e) {{\n", config::stringType, f.name);
+		*out.source << "\tswitch (e) {\n";
+		for (auto const& [k, _] : f.values) {
+			*out.source << fmt::format("\tcase {0}::{1}:\n", f.name, k);
+			*out.source << fmt::format("\t\treturn \"{0}\"{1};\n", k, config::stringLiteral);
+		}
+		*out.source << "\t}\n";
+		*out.source << "}\n\n";
+		// fromString and fromStringView
+
+		auto fromString = [out, &f](auto stringType, auto stringLiteral) {
+			*out.header << fmt::format("void fromString({0}& out, {1} const& str);\n", f.name, stringType);
+			*out.source << fmt::format("void fromString({0}& out, {1} const& str) {{\n", f.name, stringType);
+			bool first = true;
+			for (auto const& [k, _] : f.values) {
+				*out.source << fmt::format(
+				    "\t{0} (str == \"{1}\"{2}) {{\n", first ? "if" : "} else if", k, stringLiteral);
+				*out.source << fmt::format("\t\treturn {}::{};\n", f.name, k);
+				first = false;
+			}
+			*out.source << "\t} else {\n";
+			*out.source << fmt::format("\t\t{};\n", config::parseException);
+			*out.source << "\t}\n";
+			*out.source << "}\n";
+		};
+		fromString(config::stringType, config::stringLiteral);
+		fromString(config::stringViewType, config::stringViewLiteral);
+		*out.header << '\n';
+		*out.source << '\n';
+	}
 }
 
-void emit(std::ostream& out, expression::Union const& u) {
+void emit(Streams out, expression::Union const& u) {
 	std::vector<std::string_view> types;
 	types.reserve(u.types.size());
 	std::transform(
 	    u.types.begin(), u.types.end(), std::back_inserter(types), [](auto const& t) { return convertType(t); });
-	out << fmt::format("using {} = std::variant<{}>;\n", u.name, fmt::join(types, ", "));
+	*out.header << fmt::format("using {} = std::variant<{}>;\n", u.name, fmt::join(types, ", "));
 }
 
-void emit(std::ostream& out, expression::Field const& f) {
+void emit(Streams out, expression::Field const& f) {
 	std::string assignment;
 	auto type = std::string(convertType(f.type));
 	if (f.isArrayType) {
@@ -52,7 +110,7 @@ void emit(std::ostream& out, expression::Field const& f) {
 	}
 	if (f.defaultValue) {
 		if (expression::primitiveTypes.contains(type)) {
-			if (expression::primitiveTypes[type].second == expression::PrimitiveTypeClass::StringType) {
+			if (expression::primitiveTypes[type].typeClass == expression::PrimitiveTypeClass::StringType) {
 				assignment = fmt::format(" = \"{}\"", f.defaultValue.value());
 			} else {
 				assignment = fmt::format(" = {}", f.defaultValue.value());
@@ -62,16 +120,26 @@ void emit(std::ostream& out, expression::Field const& f) {
 			assignment = fmt::format(" = {}::{}", type, f.defaultValue.value());
 		}
 	}
-	out << fmt::format("\t{} {}{};\n", type, f.name, assignment);
+	*out.header << fmt::format("\t{} {}{};\n", type, f.name, assignment);
 }
 
-void emit(std::ostream& out, expression::StructOrTable const& st) {
+void emit(Streams out, expression::StructOrTable const& st, flowflat::Type type) {
+	std::string typeStr = type == flowflat::Type::Struct ? "flowflat::Type::Struct" : "flowflat::Type::Table";
 	Defer defer;
-	out << fmt::format("struct {} {{\n", st.name);
-	defer([&out]() { out << "};\n"; });
+	*out.header << fmt::format("struct {} {{\n", st.name);
+	*out.header << fmt::format("\t[[nodiscard]] flowflat::Type flowFlatType() const {{ return {}; }};\n\n", typeStr);
+	defer([&out]() { *out.header << "};\n"; });
 	for (auto const& f : st.fields) {
 		emit(out, f);
 	}
+}
+
+void emit(Streams out, expression::Struct const& st) {
+	emit(out, st, flowflat::Type::Struct);
+}
+
+void emit(Streams out, expression::Table const& st) {
+	emit(out, st, flowflat::Type::Table);
 }
 
 using DependencyMap = boost::unordered_map<std::string, boost::unordered_set<std::string>>;
@@ -145,20 +213,19 @@ std::vector<std::string> establishEmitOrder(expression::ExpressionTree const& tr
 	}
 	return res;
 }
-} // namespace
 
-void emit(std::ostream& out, expression::ExpressionTree const& tree) {
+void emit(Streams out, expression::ExpressionTree const& tree) {
 	Defer defer;
 	if (tree.namespacePath) {
-		out << fmt::format("namespace {} {{\n", fmt::join(tree.namespacePath.value(), "::"));
+		*out.header << fmt::format("namespace {} {{\n", fmt::join(tree.namespacePath.value(), "::"));
 		defer([&out, &tree]() {
-			out << fmt::format("}} // namespace {}\n", fmt::join(tree.namespacePath.value(), "::"));
+			*out.header << fmt::format("}} // namespace {}\n", fmt::join(tree.namespacePath.value(), "::"));
 		});
 	}
 	// enums have no dependencies, so we will emit them first
 	for (auto const& [_, e] : tree.enums) {
 		emit(out, e);
-		out << "\n";
+		*out.header << "\n";
 	}
 	auto types = establishEmitOrder(tree);
 	for (auto const& t : types) {
@@ -171,7 +238,40 @@ void emit(std::ostream& out, expression::ExpressionTree const& tree) {
 		} else {
 			throw Error("BUG");
 		}
-		out << "\n";
+		*out.header << "\n";
 	}
 }
+
+std::string headerGuard(std::string const& stem) {
+	auto res = "FLOWFLAT_"s;
+	res.reserve(res.size() + stem.size() + 2);
+	std::transform(stem.begin(), stem.end(), std::back_inserter(res), [](auto c) { return std::toupper(c); });
+	res.push_back('_');
+	res.push_back('H');
+	return res;
+}
+
+} // namespace
+
+void Compiler::generateCode(const std::string& headerDir, const std::string& sourceDir) {
+	namespace fs = boost::filesystem;
+	for (auto const& [name, expr] : compiledFiles) {
+		auto stem = fs::path(name).stem().string();
+		auto headerFileName = stem + ".h";
+		auto sourceFileName = stem + ".cpp";
+		auto header = fs::path(headerDir) / headerFileName;
+		auto source = fs::path(sourceDir) / sourceFileName;
+		std::ofstream headerStream(header.c_str(), std::ios_base::out | std::ios_base::trunc);
+		std::ofstream sourceStream(source.c_str(), std::ios_base::out | std::ios_base::trunc);
+		Defer defer;
+		auto guard = headerGuard(stem);
+		headerStream << "// THIS FILE WAS GENERATED BY FLOWFLATC, DO NOT EDIT!\n";
+		headerStream << fmt::format("#ifndef {0}\n#define {0}\n#include <flowflat/flowflat.h>\n\n", guard);
+		headerStream << config::defaultIncludes() << "\n";
+		defer([&headerStream, &guard]() { headerStream << fmt::format("\n#endif // #ifndef {}\n", guard); });
+		Streams streams{ &headerStream, &sourceStream };
+		emit(streams, *expr);
+	}
+}
+
 } // namespace flatbuffers

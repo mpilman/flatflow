@@ -11,6 +11,7 @@
 #include <fmt/format.h>
 #include <fstream>
 
+#include "Config.h"
 #include "Compiler.h"
 #include "Parser.h"
 #include "Error.h"
@@ -22,29 +23,34 @@ using namespace std::string_view_literals;
 
 namespace expression {
 
-boost::unordered_map<std::string_view, std::pair<std::string_view, PrimitiveTypeClass>> primitiveTypes{
-	{ "bool", { "bool", PrimitiveTypeClass::BoolType } },
-	{ "byte", { "char", PrimitiveTypeClass::CharType } },
-	{ "ubyte", { "unsigned char", PrimitiveTypeClass::CharType } },
-	{ "short", { "short", PrimitiveTypeClass::IntType } },
+// clang-format off
+#define DESC(t, c) { #t, PrimitiveTypeClass::c##Type, sizeof(t) }
+// clang-format on
+
+boost::unordered_map<std::string_view, TypeDescription> primitiveTypes{
+	{ "bool", DESC(bool, Bool) },
+	{ "byte", DESC(char, Char) },
+	{ "ubyte", DESC(unsigned char, Char) },
+	{ "short", DESC(short, Int) },
 	{ "ushort", { "unsigned short", PrimitiveTypeClass::IntType } },
-	{ "int", { "int", PrimitiveTypeClass::IntType } },
-	{ "uint", { "unsigned", PrimitiveTypeClass::IntType } },
-	{ "float", { "float", PrimitiveTypeClass::FloatType } },
-	{ "long", { "long", PrimitiveTypeClass::IntType } },
-	{ "ulong", { "unsigned long", PrimitiveTypeClass::IntType } },
-	{ "double", { "double", PrimitiveTypeClass::FloatType } },
-	{ "int8", { "int8_t", PrimitiveTypeClass::IntType } },
-	{ "uint8", { "uint8_t", PrimitiveTypeClass::IntType } },
-	{ "int16", { "int16_t", PrimitiveTypeClass::IntType } },
-	{ "uint16", { "uint16_t", PrimitiveTypeClass::IntType } },
-	{ "int32", { "int32_t", PrimitiveTypeClass::IntType } },
-	{ "uint32", { "uint32_t", PrimitiveTypeClass::IntType } },
-	{ "int64", { "int64_t", PrimitiveTypeClass::IntType } },
-	{ "uint64", { "uint64_t", PrimitiveTypeClass::IntType } },
-	{ "float32", { "float", PrimitiveTypeClass::FloatType } },
-	{ "float64", { "double", PrimitiveTypeClass::FloatType } },
-	{ "string", { "std::string", PrimitiveTypeClass::StringType } },
+	{ "int", DESC(int, Int) },
+	{ "uint", DESC(unsigned, Int) },
+	{ "float", DESC(float, Float) },
+	{ "long", DESC(long, Int) },
+	{ "ulong", DESC(unsigned long, Int) },
+	{ "double", DESC(double, Float) },
+	{ "int8", DESC(int8_t, Int) },
+	{ "uint8", DESC(uint8_t, Int) },
+	{ "int16", DESC(int16_t, Int) },
+	{ "uint16", DESC(uint16_t, Int) },
+	{ "int32", DESC(int32_t, Int) },
+	{ "uint32", DESC(uint32_t, Int) },
+	{ "int64", DESC(int64_t, Int) },
+	{ "uint64", DESC(uint64_t, Int) },
+	{ "float32", DESC(float, Float) },
+	{ "float64", DESC(double, Float) },
+	{ "string",
+	  TypeDescription{ .nativeName = config::stringType, .typeClass = PrimitiveTypeClass::StringType, ._size = 4 } },
 };
 } // namespace expression
 
@@ -56,6 +62,27 @@ boost::unordered_set<std::string_view> reservedAttributes{
 	"id",         "deprecated", "required", "force_align",   "force_align", "bit_flags", "nested_flatbuffer",
 	"flexbuffer", "key",        "hash",     "original_order"
 };
+
+MetadataEntry globalMetadata(std::string const& name,
+                             ast::Metadata::mapped_type const& value,
+                             std::string const& errMsg) {
+	// should not be used directly
+	// fmt::print("Error: Unknown or unsupported metadata type: {}", metadata->toString());
+	throw Error("Unknown or unsupported metadata");
+}
+
+MetadataEntry fieldMetadata(ast::FieldDeclaration const& field,
+                            std::string const& name,
+                            ast::Metadata::mapped_type const& value) {
+	if (name == "deprecated") {
+		if (value) {
+			fmt::print(stderr, "Didn't expect value for metadata type {}\n", name);
+			throw Error("Unexpected metadata value");
+		}
+		return MetadataEntry{ .type = MetadataType::deprecated };
+	}
+	return globalMetadata(name, value, "");
+}
 
 bool startsWith(std::string_view str, std::string_view prefix) {
 	return str.substr(0, prefix.size()) == prefix;
@@ -128,8 +155,8 @@ struct CompilerVisitor : ast::Visitor {
 			fmt::print(stderr, "Error: Type {} already exists\n", declaration.identifier);
 			throw Error("Duplicate type");
 		} else if (!primitiveTypes.contains(declaration.type) ||
-		           (primitiveTypes[declaration.type].second != PrimitiveTypeClass::IntType &&
-		            primitiveTypes[declaration.type].second != PrimitiveTypeClass::CharType)) {
+		           (primitiveTypes[declaration.type].typeClass != PrimitiveTypeClass::IntType &&
+		            primitiveTypes[declaration.type].typeClass != PrimitiveTypeClass::CharType)) {
 			fmt::print(stderr, "Error: Type {} can't be used as base for an enum\n", declaration.type);
 			throw Error("Incompatible enum type");
 		}
@@ -199,6 +226,9 @@ struct CompilerVisitor : ast::Visitor {
 			if (field.value) {
 				f.defaultValue = field.value.value().toString();
 			}
+			for (auto const& m : field.metadata) {
+				f.metadata.push_back(fieldMetadata(field, m.first, m.second));
+			}
 			res.fields.push_back(f);
 		}
 	}
@@ -220,6 +250,9 @@ struct CompilerVisitor : ast::Visitor {
 } // namespace
 
 namespace expression {
+
+unsigned Field::size(Compiler const& compiler) const {}
+unsigned StructOrTable::size(const Compiler& compiler) const {}
 
 bool ExpressionTree::typeExists(const std::string& name) const {
 	return primitiveTypes.contains(name) || enums.contains(name) || unions.contains(name) || structs.contains(name) ||
@@ -315,25 +348,23 @@ void ExpressionTree::verify() const {
 		}
 	}
 }
-ExpressionTree ExpressionTree::fromFile(std::string const& path) {
-	ExpressionTree res;
+} // namespace expression
+
+Compiler::Compiler(std::vector<std::string> includePaths) : includePaths(std::move(includePaths)) {}
+
+void Compiler::compile(std::string const& path) {
+	if (auto iter = files.find(path); iter != files.end()) {
+		compiledFiles[path] = iter->second;
+	}
+	auto res = std::make_shared<expression::ExpressionTree>();
 	std::ifstream ifs(path.c_str());
 	std::string content((std::istreambuf_iterator<char>(ifs)), (std::istreambuf_iterator<char>()));
 	auto schema = parseSchema(content);
-	CompilerVisitor visitor(res);
+	CompilerVisitor visitor(*res);
 	schema.accept(visitor);
-	res.verify();
-	return res;
-}
-} // namespace expression
-
-void compile(std::ostream& out, const flatbuffers::ast::SchemaDeclaration& schema) {
-	expression::ExpressionTree state;
-	CompilerVisitor visitor(state);
-	schema.accept(visitor);
-	std::vector<std::string> tables;
-	state.verify();
-	// state.emit(out);
+	res->verify();
+	files[path] = res;
+	compiledFiles[path] = res;
 }
 
 } // namespace flatbuffers

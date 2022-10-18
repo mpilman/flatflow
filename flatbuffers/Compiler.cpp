@@ -318,7 +318,7 @@ void ExpressionTree::verifyField(std::string name, bool isStruct, const Field& f
 
 void ExpressionTree::verify(StaticContext const& context) const {
 	auto assertTypeIsUnique = [&context](std::string const& name) {
-		if (context.resolve(name)) {
+		if (context.resolve(name, true)) {
 			std::cerr << fmt::format("Error: Duplicate type: {}", name);
 			throw Error("Duplicate type");
 		}
@@ -377,9 +377,6 @@ std::optional<Type const*> ExpressionTree::findType(const std::string& name) con
 }
 } // namespace expression
 
-StaticContext::StaticContext(Compiler& compiler)
-  : compiler(compiler), currentFile(std::make_shared<ExpressionTree>()) {}
-
 Compiler::Compiler(std::vector<std::string> includePaths) : includePaths(std::move(includePaths)) {}
 
 void Compiler::compile(std::string const& inputPath) {
@@ -408,6 +405,24 @@ void Compiler::generateCode(const std::string& headerDir, const std::string& sou
 		auto source = fs::path(sourceDir) / sourceFileName;
 		CodeGenerator(context.get()).emit(stem, header, source);
 	}
+}
+void Compiler::describeTables() const {
+	for (auto const& [path, context] : compiledFiles) {
+		fmt::print("Discribing tables in {}:\n", path.string());
+		fmt::print("================================================\n");
+		for (auto const& [_, table] : context->currentFile->tables) {
+			fmt::print("Describing table {}\n", table.name);
+			context->describeTable(table.name);
+			fmt::print("------------------------------------------------\n");
+		}
+	}
+}
+
+[[nodiscard]] std::size_t hash_value(TypeName const& v) {
+	std::size_t seed = 0;
+	boost::hash_combine(seed, v.name);
+	boost::hash_combine(seed, v.path);
+	return seed;
 }
 
 } // namespace flatbuffers

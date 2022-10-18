@@ -3,6 +3,8 @@ project(FlatBuffer)
 
 set(CMAKE_CXX_STANDARD 17)
 
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address,undefined")
+
 find_package(Boost 1.78 REQUIRED COMPONENTS filesystem)
 find_package(fmt REQUIRED)
 

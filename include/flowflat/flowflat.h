@@ -10,6 +10,10 @@ namespace flowflat {
 
 enum class Type { Struct, Table };
 
+using uoffset_t = uint32_t;
+using soffset_t = int32_t;
+using voffset_t = int16_t;
+
 } // namespace flowflat
 
 #endif // FLATBUFFER_FLOWFLAT_H

@@ -58,6 +58,7 @@ int main(int argc, const char* argv[]) {
 		compiler.compile(argv[i]);
 	}
 	compiler.generateCode(headerDir, sourceDir);
+	compiler.describeTables();
 
 	//	for (int i = 1; i < argc; ++i) {
 	//		fmt::print("Parsing file: {}\n", argv[i]);

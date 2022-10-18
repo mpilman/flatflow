@@ -19,6 +19,19 @@ private:
 	[[nodiscard]] const char* what() const noexcept override;
 };
 
+class InternalError : public Error {
+public:
+	InternalError() : Error("Internal Error") {}
+};
+
+template <class B>
+B assertTrue(B b) {
+	if (!b) {
+		throw InternalError();
+	}
+	return b;
+}
+
 } // namespace flatbuffers
 
 #endif // FLATBUFFER_ERROR_H

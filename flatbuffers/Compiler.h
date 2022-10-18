@@ -36,7 +36,7 @@ enum class TypeType { Primitive, Enum, Union, Struct, Table };
 struct Type {
 	std::string name;
 	Type() = default;
-	explicit Type(std::string const& name);
+	explicit Type(std::string name);
 	virtual ~Type() = default;
 	[[nodiscard]] virtual TypeType typeType() const = 0;
 };
@@ -114,7 +114,12 @@ extern boost::unordered_map<std::string_view, PrimitiveType> primitiveTypes;
 struct TypeName {
 	std::string name;
 	std::vector<std::string> path;
+
+	[[nodiscard]] inline bool operator==(TypeName const& rhs) const { return name == rhs.name && path == rhs.path; }
+	[[nodiscard]] bool operator!=(TypeName const& rhs) const { return !(*this == rhs); }
 };
+
+[[nodiscard]] std::size_t hash_value(TypeName const& v);
 
 struct StaticContext;
 
@@ -136,6 +141,7 @@ public:
 
 	// defined in CodeGenerator.cpp
 	void generateCode(std::string const& headerDir, std::string const& sourceDir);
+	void describeTables() const;
 };
 
 } // namespace flatbuffers

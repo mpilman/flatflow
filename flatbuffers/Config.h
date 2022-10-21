@@ -10,8 +10,6 @@
 namespace flatbuffers::config {
 using namespace std::string_view_literals;
 
-std::string const& defaultIncludes();
-
 constexpr std::string_view usingLiterals =
     "using namespace std::string_literals;\nusing namespace std::string_view_literals;"sv;
 

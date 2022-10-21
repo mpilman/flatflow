@@ -15,7 +15,8 @@ class CodeGenerator {
 	void emit(struct Streams& out, expression::Enum const& anEnum) const;
 	void emit(struct Streams& out, expression::Union const& anUnion) const;
 	void emit(struct Streams& out, expression::Field const& field) const;
-	void emit(struct Streams& out, expression::StructOrTable const& st) const;
+	void emit(struct Streams& out, expression::Struct const& st) const;
+	void emit(struct Streams& out, expression::Table const& table) const;
 
 public:
 	explicit CodeGenerator(StaticContext* context);
